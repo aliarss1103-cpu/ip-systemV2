@@ -48,8 +48,8 @@ def send(msg):
             pass
 
 
-# ---------------- COOLDOWN (30 DK) ----------------
-def blocked(ip):
+# ---------------- 30 DK KONTROL ----------------
+def ip_kaydedilsin_mi(ip):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT time FROM logs WHERE ip=? ORDER BY id DESC LIMIT 1", (ip,))
@@ -57,14 +57,15 @@ def blocked(ip):
     conn.close()
 
     if not row:
-        return False
+        return True
 
     last = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
-    return datetime.now() - last < timedelta(minutes=30)
+    return datetime.now() - last > timedelta(minutes=30)
 
 
-# ---------------- INSERT LOG ----------------
-def log(ip, country, city, isp):
+# ---------------- LOG ----------------
+def log(ip):
+    country, city, isp = geo(ip)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     conn = sqlite3.connect(DB)
@@ -77,9 +78,15 @@ def log(ip, country, city, isp):
     send(f"📡 IP: {ip} | {country} - {city} | {isp} | {now}")
 
 
-# ---------------- 404 PAGE ----------------
+# ---------------- HOME (LOG BURADA) ----------------
 @app.route("/")
 def home():
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    ip = ip.split(",")[0].strip()
+
+    if ip_kaydedilsin_mi(ip):
+        log(ip)
+
     return """
     <body style="background:black;color:white;text-align:center;font-family:monospace;padding-top:120px;">
         <h1 style="font-size:70px;">404</h1>
@@ -93,15 +100,6 @@ def home():
 # ---------------- ADMIN PANEL ----------------
 @app.route("/rexa/1103")
 def admin():
-
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
-    ip = ip.split(",")[0].strip()
-
-    if blocked(ip):
-        return "<h1 style='color:red'>WAIT 30 MINUTES</h1>"
-
-    country, city, isp = geo(ip)
-    log(ip, country, city, isp)
 
     conn = sqlite3.connect(DB)
     c = conn.cursor()
